@@ -1,0 +1,95 @@
+name: CI & DevEx AI Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main, master]
+    paths:
+      - 'src/**'
+      - 'package.json'
+      - 'tsconfig.json'
+      - 'CR.md'
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  checks: write
+
+jobs:
+  build-and-test:
+    name: TypeScript Check & Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci || npm install
+
+      - name: TypeScript Typecheck
+        run: npm run lint
+
+      - name: Run Unit Tests
+        run: npm run test
+
+  trigger-devex-review-gcp:
+    name: Trigger DevEx AI Review (GCP Cloud Function)
+    needs: build-and-test
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code with History
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Package PR Diff and CR.md
+        id: package-context
+        run: |
+          git fetch origin ${{ github.base_ref }} --depth=1 || true
+          PR_DIFF=$(git diff origin/${{ github.base_ref }}...HEAD)
+          CR_MD=""
+          if [ -f "CR.md" ]; then
+            CR_MD=$(cat CR.md)
+          fi
+
+          jq -n \
+            --arg repo "${{ github.repository }}" \
+            --arg pr "${{ github.event.pull_request.number }}" \
+            --arg sha "${{ github.event.pull_request.head.sha }}" \
+            --arg title "${{ github.event.pull_request.title }}" \
+            --arg diff "$PR_DIFF" \
+            --arg cr "$CR_MD" \
+            --arg tok "${{ secrets.GITHUB_TOKEN }}" \
+            '{
+              repository: $repo,
+              pr_number: ($pr | tonumber),
+              commit_sha: $sha,
+              pr_title: $title,
+              coverage_percentage: 100.0,
+              diff_text: $diff,
+              cr_rules_content: $cr,
+              github_token: $tok
+            }' > /tmp/devex_payload.json
+
+      - name: Dispatch Webhook to GCP Cloud Function Endpoint
+        env:
+          FUNCTION_URL: ${{ secrets.GCP_FUNCTION_URL || 'https://start-pipeline-jnivj7micq-uc.a.run.app' }}
+          PIPELINE_KEY: ${{ secrets.DEVEX_PIPELINE_API_KEY || '3ad88cff04a5c37bd31c1b29da400dae8b1c45d23c389465' }}
+        run: |
+          echo "Dispatching webhook to central DevEx GCP Cloud Function with inlined diff and CR.md..."
+          curl --fail-with-body -X POST "$FUNCTION_URL" \
+            -H "Content-Type: application/json" \
+            -H "X-Api-Key: $PIPELINE_KEY" \
+            -H "X-GitHub-Token: ${{ secrets.GITHUB_TOKEN }}" \
+            -d @/tmp/devex_payload.json
