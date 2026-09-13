@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { UserProfile } from '../types/user';
+import { normalizeEmail, isValidEmailFormat } from '../utils/sanitizer';
 
 interface UserProfileCardProps {
   user: UserProfile;
@@ -17,9 +18,19 @@ export const UserProfileCard: React.FC<UserProfileCardProps> = ({ user, onSave }
     e.preventDefault();
     setSaving(true);
     setMessage(null);
+
+    // Enforce ADR-TS-005 & Gherkin Issue #1: normalize email (strip whitespace + lowercase)
+    const sanitizedEmail = normalizeEmail(email);
+    if (!isValidEmailFormat(sanitizedEmail)) {
+      setMessage('Error: Invalid email format provided.');
+      setSaving(false);
+      return;
+    }
+
     try {
-      await onSave(name, email);
+      await onSave(name.trim(), sanitizedEmail);
       setIsEditing(false);
+      setEmail(sanitizedEmail);
       setMessage('Profile updated successfully!');
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : 'Unknown error';
